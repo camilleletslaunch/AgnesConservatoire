@@ -4,13 +4,14 @@ from openpyxl.pivot.fields import Boolean
 from openpyxl.workbook import Workbook
 from pandas.core.interchange.dataframe_protocol import DataFrame
 
-import find_origin
-from find_origin import process_flow
 import pandas as pd
 import re
 from openpyxl import load_workbook
 from openpyxl.cell import Cell
 from openpyxl.workbook import Workbook
+
+## TODO: use this instead: file_path = os.path.join('1 - Semis - Années antérieures', year, f'Semis serre {year}.xls')
+## TODO: fix the iloc: line_semis['N° lot stock'].iloc[0]
 
 ORIGINE_LOT_DIRECT = ['Don producteur / particulier', 'Inconnue', 'Institiut technique', 'Jardin botanique', 'Nature', 'Pépiniériste / semencier']
 FIRST_PATTERN_TEST = 'G77 bis        11 godets en fleurs (11-ps-531) repiq le 8/06/2011'
@@ -28,7 +29,8 @@ def open_fichier_semis_ext(yr: str) -> DataFrame:
     return pd.read_excel(semis_file_full_path, sheet_name='SEMIS EXT')
 
 def get_file_type_from_first_pattern(first_pattern:str) -> str:
-    pt = r"(?<=-)[A-Z]{2}(?=-)"
+    pt = r"(?<=-)[a-zA-Z]{2}(?=-)"
+    logging.debug(f'GETTING FILE TYPE FROM {first_pattern}')
     return re.search(pt, first_pattern).group()
 
 def get_first_pattern(input_str: str) -> re.Match:
@@ -38,22 +40,19 @@ def get_first_pattern(input_str: str) -> re.Match:
 def get_year_from_first_pattern(first_pattern: str) -> str:
     yr_pattern = '^[^-]+'
     match = re.match(yr_pattern, first_pattern)
+    yr2d = match.group()[-2:]
     length = len(match.group())
-    if length == 2:
-        if int(match.group()) > 30:
-            logging.debug(f'found year: {match.group()}. Prefixing 19.')
-            return '19' + match.group()
-        else:
-            logging.debug(f'found year: {match.group()}. Prefixing 20.')
-            return '20' + match.group()
+    logging.debug(f"found year {yr2d} in {first_pattern} with {yr_pattern}")
+    if int(yr2d) > 30:
+        logging.debug(f'found year: {yr2d}. Prefixing 19.')
+        return '19' + yr2d
     else:
-        if length == 4:
-            logging.debug(f'found full year: {match.group()}.')
-            return match.group()
-    raise(f'unsupported year: {match.group()}')
+        logging.debug(f'found year: {yr2d}. Prefixing 20.')
+        return '20' + yr2d
 
 def load_wb_from_gc(year:str)->Workbook:
-    gc_basename = GRANDE_COLLECTION_PATH + PATH_SEP + year + PATH_SEP + GC_FILENAME + year
+    gc_basename = GRANDE_COLLECTION_PATH + PATH_SEP + year + PATH_SEP + GC_FILENAME + ' '+year
+    logging.debug(f"OPENING {gc_basename}")
     df_gc = pd.read_excel(gc_basename + '.xls', sheet_name='GC')
     df_gc.to_excel(gc_basename + '.xlsx', index=False)
     return load_workbook(gc_basename + '.xlsx')
@@ -70,8 +69,9 @@ def get_left_cell(line: pd.DataFrame, year = None, gc_type = True) -> Cell:
     if not year:
         year = line['STOBEGINDATEAVAILABLE'].iloc[0].strftime("%Y")
     search_str = line['ARTSORT'].iloc[0] + ' ' + line['ARTSPECIES'].iloc[0]
-    if pd.isna(line['ARTVARIETY'].iloc[0]):
-        search_str += ' ' + line['ARTVARIETY'].iloc[0]
+    if not pd.isna(line['ARTVARIETY'].iloc[0]):
+        search_str += f' {line['ARTVARIETY'].iloc[0]}'
+    logging.debug(f'searching {search_str}')
     if gc_type:
         wb = load_wb_from_gc(year)
     else:
@@ -81,8 +81,8 @@ def get_left_cell(line: pd.DataFrame, year = None, gc_type = True) -> Cell:
         for cell in row:
             if cell.value == search_str:
                 return ws.cell(row=cell.row, column=cell.column - 1)
-    logging.error(f"No left cell found for year {year} in fin {gc_basename}.xls, sheet GC")
-    raise Exception(f"No left cell found for year {year} in fin {gc_basename}.xls, sheet GC")
+    logging.error(f"No left cell found for year {year} in fin , sheet GC")
+    raise Exception(f"No left cell found for year {year} in fin , sheet GC")
 
 
 def find_jb(left_cell: Cell) -> str:
@@ -95,7 +95,7 @@ def find_jb(left_cell: Cell) -> str:
 def find_orig_pattern(left_cell: Cell) -> str:
     orig_pattern = r"(?i)orig(ine|\.|)(.*)"
     if re.search(orig_pattern, left_cell.value):
-        logging.debug('FOUND ORIG IN LEFT_CELL')
+        logging.debug(f'FOUND ORIG IN LEFT_CELL: {left_cell.value}')
         return left_cell.value
     return None
 
@@ -113,31 +113,38 @@ def process_step_4(df: DataFrame, lot: int, line:DataFrame, gc_type = True, year
     jb_found = find_jb(left_cell)
     if jb_found is None:
         orig_found = find_orig_pattern(left_cell)
-    if jb_found is not None | orig_found is not None:
+    if jb_found is not None or orig_found is not None:
+        logging.debug(f"updating flow file with {origine_full_text} for lot={lot}")
         df = update_flow_file(df, origine_full_text, lot)
         return df
-    if get_first_pattern(left_cell.value):
+    first_pattern_match = get_first_pattern(left_cell.value)
+    if first_pattern_match:
+        first_pattern = first_pattern_match.group()
         ###################### ETAPE 5 ##########################
-        logging.debug('FOUND FIRST PATTERN IN LEFT_CELL')
+        logging.debug(f'FOUND FIRST PATTERN IN LEFT_CELL {left_cell.value}')
         yr = get_year_from_first_pattern(left_cell.value)
         file_type = get_file_type_from_first_pattern(origine_full_text)
+        logging.debug(f"year = {yr}, file_type={file_type}")
         match file_type:
-            case 'PS':
+            case x if x in ['PS','ps']:
                 df_semis = open_fichier_semis_serre(yr)
-            case 'PE':
+            case x if x in ['PE','pe']:
                 df_semis = open_fichier_semis_ext(yr)
-        prov = line['Provenance']
+        line_semis = df_semis[df_semis['N° semis'].str.lower()==first_pattern.lower()]
+        logging.debug(f"find provenance from {line_semis}")
+        prov = line_semis['Provenance'].iloc[0]
+        logging.debug(f"FOUND PROVENANCE: {prov}")
         try:
-            recu_le = line['Reçu le ']
+            recu_le = line_semis['Reçu le '].iloc[0]
         except KeyError:
             logging.warning(f'failed to get key Reçu le  when opening semis file for {origine_full_text}. Retrying without the end space')
-            recu_le = line['Reçu le']
+            recu_le = line_semis['Reçu le'].iloc[0]
         if prov != 'CNPMAI':
             df = update_flow_file(df, origine_full_text, lot)
             logging.debug(f'found origin in fichier serre from {origine_full_text}')
         else:
             try:
-                new_lot = line['N° lot stock']
+                new_lot = line_semis['N° lot stock'].iloc[0]
                 return update_flow_file(df, new_lot, test, origine_primaire, origine_lot, origine_full_text)
             except KeyError:
                 logging.warning(f'no N° lot stock found in semis serre file for {origine_full_text} using reçu le {recu_le} instead')
